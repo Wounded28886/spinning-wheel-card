@@ -346,7 +346,7 @@ export class SpinningWheelCardEditor
             {
               name: "segments",
               selector: {
-                number: { min: 4, max: 24, step: 1, mode: "slider" },
+                number: { min: 1, max: 24, step: 1, mode: "slider" },
               },
             } satisfies HaFormSchema,
             {
