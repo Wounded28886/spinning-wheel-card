@@ -2856,6 +2856,9 @@ export class SpinningWheelCard extends LitElement {
 
     const cache = this._drawCache ?? this._buildDrawCache(ctx);
     const arcs = cache.arcs;
+    if (arcs.length === 0) {
+      return;
+    }
     const n = arcs.length;
     const colors = cache.segmentColors;
     const labelColors = cache.segmentLabelColors;
