@@ -362,7 +362,7 @@ export class SpinningWheelCard extends LitElement {
     if (config.segments !== undefined) {
       if (
         typeof config.segments !== "number" ||
-        config.segments < 4 ||
+        config.segments < 1 ||
         config.segments > 24 ||
         !Number.isInteger(config.segments)
       ) {
@@ -774,7 +774,7 @@ export class SpinningWheelCard extends LitElement {
     const todo = this._todoLabels();
     if (todo) {
       // Clamp to 4..24; < 4 items still render via label cycling.
-      return Math.max(4, Math.min(24, todo.length));
+      return Math.max(1, Math.min(24, todo.length));
     }
     return this.config.segments ?? 8;
   }
