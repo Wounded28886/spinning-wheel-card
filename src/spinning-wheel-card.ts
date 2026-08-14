@@ -14,6 +14,7 @@ import type {
   TodoItem,
 } from "./types";
 import { coulombDecel, frictionMultiplier, normalizeFriction } from "./friction";
+import { fetchOpenTodoItems } from "./todo";
 import { localize, resolveLang } from "./localize/localize";
 import { DEFAULT_LABEL_COLOR, THEME_PALETTES } from "./palettes";
 
@@ -87,9 +88,9 @@ export const wrapAngle = (a: number): number => ((a % TWO_PI) + TWO_PI) % TWO_PI
  *  payload mirrors what was in YAML.
  *  Exported for tests; `_cssToRgbTriple` on the card class delegates here. */
 export const cssToRgbTriple = (
-  css: string,
+  value: string,
 ): readonly [number, number, number] | null => {
-  const s = css.trim();
+  const s = value.trim();
   if (s.startsWith("#")) {
     if (s.length === 7) {
       const r = parseInt(s.slice(1, 3), 16);
@@ -124,9 +125,9 @@ export const cssToRgbTriple = (
  *  translucent fills and picks the wrong text colour (WCAG 1.4.3).
  *  Returns null for inputs `cssToRgbTriple` doesn't accept. */
 export const cssRgbForLuminance = (
-  css: string,
+  value: string,
 ): readonly [number, number, number] | null => {
-  const s = css.trim();
+  const s = value.trim();
   // Hex values are opaque by definition — fall through to the
   // existing parser.
   if (s.startsWith("#")) return cssToRgbTriple(s);
@@ -194,12 +195,15 @@ const TICK_MIN_INTENSITY = 0.4; // intensity floor at near-zero speed
 // few per ~16 ms anyway.
 const TICK_MAX_PER_FRAME = 8;
 
-/** Per-segment-crossing brake bump at slider level 5 (the new default).
- *  `_pegDrag()` scales linearly with the 1–10 friction slider so light
- *  setups (level 1) get ~0.016 rad/s per peg, heavy setups (level 10)
- *  get ~0.16. Capped at zero in the use-site so the brake can't reverse
- *  the spin direction. Composes with the continuous friction decay;
- *  one slider drives both. */
+/** Peg brake bump at slider level 5 (the new default). Applied once
+ *  per `_onSegmentCrossing` call — once per animation frame while
+ *  spinning, or once per pointer-move while dragging — regardless of
+ *  how many pegs were swept that call; only the audio path clicks per
+ *  peg. `_pegDrag()` scales linearly with the 1–10 friction slider so
+ *  light setups (level 1) get ~0.016 rad/s per braked frame, heavy
+ *  setups (level 10) get ~0.16. Capped at zero in the use-site so the
+ *  brake can't reverse the spin direction. Composes with the
+ *  continuous friction decay; one slider drives both. */
 const PEG_DRAG_RAD_PER_S = 0.08;
 
 /** Peg centre placement as a fraction of the wheel `radius` (the outer
@@ -816,33 +820,22 @@ export class SpinningWheelCard extends LitElement {
     return Array.from({ length: n }, (_, i) => src[i % src.length] ?? "");
   }
 
-  /** Fetch open todo items via `todo/item/list`. Dedups by summary —
-   *  the same-label-same-colour rule would otherwise collapse two
-   *  segments visually. */
+  /** Refresh open todo items from `todo/item/list` (fetch + filter +
+   *  summary-dedup live in `./todo`, shared with the editor). On success
+   *  invalidates the draw cache and clears the last result; on failure
+   *  falls back to an empty wheel. */
   private async _fetchTodoItems(): Promise<void> {
     const entity = this.config.todo_entity;
     if (!entity || !this.hass?.callWS) return;
     if (this._todoLoading) return;
     this._todoLoading = true;
     try {
-      const reply = (await this.hass.callWS({
-        type: "todo/item/list",
-        entity_id: entity,
-      })) as { items?: ReadonlyArray<TodoItem> } | undefined;
-      const all = reply?.items ?? [];
-      const open = all.filter((i) => (i.status ?? "needs_action") === "needs_action");
-      const seen = new Set<string>();
-      const unique: TodoItem[] = [];
-      for (const item of open) {
-        const key = item.summary ?? "";
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        unique.push(item);
-      }
-      this._todoItems = unique;
+      this._todoItems = (await fetchOpenTodoItems(this.hass, entity)) ?? [];
       this._invalidateDrawCache();
       this._result = null;
-      this._draw();
+      // _todoItems / _result are @state — assigning them schedules the
+      // reactive update, and updated() runs _draw() (changed has
+      // _todoItems). No explicit draw needed; mirrors the catch branch.
     } catch (err) {
       console.warn("[spinning-wheel-card] todo/item/list failed:", err);
       this._todoItems = [];
@@ -1391,10 +1384,12 @@ export class SpinningWheelCard extends LitElement {
   }
 
   /** RAF tween: ease `_angle` from current to `targetAngle` over ~220 ms
-   *  with cubic ease-out. `_spinning` stays true during the tween (the
-   *  status line keeps reading "Spinning…" so the result announcement
-   *  doesn't flash before the wheel actually rests). Cancellable via
-   *  `_cancelSettleTween` when a fresh click claims the RAF slot. */
+   *  with a sine ease-in-out (soft at both ends — see the inline note
+   *  below for why not cubic ease-out). `_spinning` stays true during
+   *  the tween (the status line keeps reading "Spinning…" so the result
+   *  announcement doesn't flash before the wheel actually rests).
+   *  Cancellable via `_cancelSettleTween` when a fresh click claims the
+   *  RAF slot. */
   private _startSettleTween(targetAngle: number): void {
     const startAngle = this._angle;
     let delta = targetAngle - startAngle;
@@ -2106,8 +2101,9 @@ export class SpinningWheelCard extends LitElement {
         this._omega -= couStep * Math.sign(this._omega);
       }
 
-      // Click on every peg swept this frame; `_onSegmentCrossing` maps
-      // rim speed → intensity and staggers the clicks across `dt`.
+      // Peg/segment-crossing handler: fires staggered audio clicks for
+      // every peg swept this frame (gated on `sound`) AND applies the
+      // per-frame peg brake to `_omega` (gated on `pegs`).
       this._onSegmentCrossing(Math.abs(this._omega), dt);
 
       this._draw();
@@ -2551,12 +2547,18 @@ export class SpinningWheelCard extends LitElement {
     return c?.getBoundingClientRect() ?? null;
   }
 
-  // Client (x, y) → angle from canvas centre. 0 = +X axis, CCW.
+  // Client (x, y) → angle from the wheel centre. 0 = +X axis, CCW.
+  // The wheel is drawn centred at (size/2, size/2) in `_draw`, and the
+  // canvas CSS width is always `size` (`_applyCanvasSize`), so the true
+  // centre is rect.width/2 on BOTH axes. We deliberately use rect.width
+  // (not rect.height) for the vertical pivot: in half mode the canvas BOX
+  // is only size·HALF_ASPECT tall, so rect.height/2 would land ~0.21·size
+  // above the real centre and skew drag-to-rotate + flick sampling.
   private _angleFrom(ev: PointerEvent): number | null {
     const rect = this._wheelRect();
     if (!rect) return null;
     const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
+    const cy = rect.top + rect.width / 2;
     return Math.atan2(ev.clientY - cy, ev.clientX - cx);
   }
 
@@ -3099,20 +3101,31 @@ export class SpinningWheelCard extends LitElement {
       changed.has("_todoItems");
     if (changed.has("config")) {
       // half_circle toggle reshapes the canvas without changing the
-      // wrap; ResizeObserver wouldn't refire on its own. Idempotent
-      // when diameter is unchanged.
-      const wrap = this.shadowRoot?.querySelector(".wheel-wrap") as
-        | HTMLElement
-        | null;
-      if (wrap) {
-        const rect = wrap.getBoundingClientRect();
-        if (rect.width > 0 || rect.height > 0) {
-          this._size = this._clampSize(
-            this._fitDim(rect.width, rect.height),
-          );
+      // wrap; ResizeObserver wouldn't refire on its own. Gated to the
+      // first render and actual half_circle flips — the editor emits a
+      // fresh config object on every keystroke, and re-running
+      // getBoundingClientRect() + resize for each one is a forced
+      // layout per keystroke. Idempotent when diameter is unchanged.
+      const prevConfig = changed.get("config") as
+        | SpinningWheelCardConfig
+        | undefined;
+      if (
+        prevConfig === undefined ||
+        prevConfig.half_circle !== this.config.half_circle
+      ) {
+        const wrap = this.shadowRoot?.querySelector(".wheel-wrap") as
+          | HTMLElement
+          | null;
+        if (wrap) {
+          const rect = wrap.getBoundingClientRect();
+          if (rect.width > 0 || rect.height > 0) {
+            this._size = this._clampSize(
+              this._fitDim(rect.width, rect.height),
+            );
+          }
         }
+        this._applyCanvasSize();
       }
-      this._applyCanvasSize();
     }
     if (changed.has("hass") && this.hass) {
       const dark = this.hass.themes?.darkMode;
