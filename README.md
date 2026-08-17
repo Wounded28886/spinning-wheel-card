@@ -1,6 +1,6 @@
 # Spinning Wheel Card
 
-This fork modified the minimum number of segments to 0
+This fork modified the minimum number of segments to 1
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![Version](https://img.shields.io/github/v/release/rolandzeiner/spinning-wheel-card?label=version&color=blue)](https://github.com/rolandzeiner/spinning-wheel-card/releases)
